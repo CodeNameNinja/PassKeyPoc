@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Passkey Registration and Authentication Demo</title>
+</head>
+<body>
+<h1>Passkey Registration and Authentication Demo</h1>
+<button onclick="registerPasskey()">Register Passkey</button>
+<button onclick="authenticate()">Login with Passkey</button>
+
+<script>
+
+    function bufferEncode(value) {
+        // Check if value is already a string, likely base64url encoded
+        if (typeof value === 'string') {
+            return value;
+        }
+        // Encode ArrayBuffer or Uint8Array to base64url
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(value)));
+        return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+
+    function bufferDecode(value) {
+        return Uint8Array.from(atob(value), c => c.charCodeAt(0));
+    }
+
+    function base64urlToArrayBuffer(base64urlString) {
+        // Convert base64url to base64
+        let base64 = base64urlString.replace(/-/g, '+').replace(/_/g, '/');
+        // Pad with '=' to make length a multiple of 4
+        while (base64.length % 4) {
+            base64 += '=';
+        }
+        const binaryString = atob(base64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    async function registerPasskey() {
+        try {
+            // Fetch registration options from the server
+            const optionsResponse = await fetch('http://localhost:3000/generate-registration-options');
+            const options = await optionsResponse.json();
+
+            // Convert challenge and user ID from base64 to ArrayBuffer
+            options.challenge = bufferDecode(options.challenge);
+            options.user.id = bufferDecode(options.user.id);
+
+            // Convert any other binary data in options if necessary
+            if (options.excludeCredentials) {
+                options.excludeCredentials = options.excludeCredentials.map(cred => {
+                    return {
+                        ...cred,
+                        id: bufferDecode(cred.id)
+                    };
+                });
+            }
+
+            // Create the passkey (credential) using WebAuthn API
+            const credential = await navigator.credentials.create({ publicKey: options });
+
+            // Prepare the credential to send to the server
+            const registrationResponse = {
+                id: bufferEncode(credential.id),
+                rawId: bufferEncode(credential.rawId),
+                type: credential.type,
+                response: {
+                    attestationObject: bufferEncode(credential.response.attestationObject),
+                    clientDataJSON: bufferEncode(credential.response.clientDataJSON),
+                },
+                clientExtensionResults: credential.getClientExtensionResults(),
+            };
+
+            // Send the credential back to the server for verification
+            const userId = options.user.id;
+            const response = {
+                userId: bufferEncode(userId),
+                registrationResponse: registrationResponse,
+            };
+
+            const verificationResponse = await fetch('http://localhost:3000/verify-registration', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(response),
+            });
+
+            const verificationResult = await verificationResponse.json();
+
+            if (verificationResult.success) {
+                // Store the userId for later authentication
+                localStorage.setItem('userId', bufferEncode(userId));
+                alert('Passkey registered successfully!');
+            } else {
+                alert('Registration failed: ' + verificationResult.error);
+            }
+        } catch (error) {
+            console.error('Registration error:', error);
+            alert('An error occurred during registration.');
+        }
+    }
+
+    async function authenticate() {
+        try {
+            // Retrieve the stored userId
+            const storedUserId = localStorage.getItem('userId');
+            if (!storedUserId) {
+                alert('No user registered. Please register first.');
+                return;
+            }
+            const userId = storedUserId;
+
+            // Fetch authentication options from the server
+            const optionsResponse = await fetch(`http://localhost:3000/generate-authentication-options?userId=${encodeURIComponent(userId)}`);
+            const options = await optionsResponse.json();
+
+            // Convert challenge and credential IDs from base64 to ArrayBuffer
+            options.challenge = base64urlToArrayBuffer(options.challenge);
+            options.allowCredentials = options.allowCredentials.map(cred => {
+                return {
+                    ...cred,
+                    id: base64urlToArrayBuffer(cred.id)
+                };
+            });
+
+            // Request the authenticator to get an assertion
+            const assertion = await navigator.credentials.get({ publicKey: options });
+
+            // Prepare the authentication response to send to the server
+            const authenticationResponse = {
+                id: assertion.id,
+                rawId: bufferEncode(assertion.rawId),
+                type: assertion.type,
+                response: {
+                    authenticatorData: bufferEncode(assertion.response.authenticatorData),
+                    clientDataJSON: bufferEncode(assertion.response.clientDataJSON),
+                    signature: bufferEncode(assertion.response.signature),
+                    userHandle: assertion.response.userHandle ? bufferEncode(assertion.response.userHandle) : null,
+                },
+                clientExtensionResults: assertion.getClientExtensionResults(),
+            };
+
+            // Send the authentication response to the server for verification
+            const verificationResponse = await fetch('http://localhost:3000/verify-authentication', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId, authenticationResponse }),
+            });
+
+            const verificationResult = await verificationResponse.json();
+
+            if (verificationResult.success) {
+                alert('Authentication successful!');
+            } else {
+                alert('Authentication failed: ' + verificationResult.error);
+            }
+        } catch (error) {
+            console.error('Authentication error:', error);
+            alert('An error occurred during authentication.');
+        }
+    }
+</script>
+</body>
+</html>
